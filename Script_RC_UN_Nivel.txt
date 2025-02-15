@@ -1,0 +1,280 @@
+import openseespy.opensees as ops
+import math
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------
+# Script OpenSeesPy: Marco 2D (1 nivel, 1 crujía) no lineal
+# con materiales concreto y acero, análisis estático y
+# dinámico usando un registro sísmico.
+# Unidades: N, m, s
+# ------------------------------------------------------------
+
+ops.wipe()
+ops.model('basicBuilder', '-ndm', 2, '-ndf', 3)
+
+# ---------------------------------------------------------
+# 1. PARÁMETROS BÁSICOS DEL MARCO
+# ---------------------------------------------------------
+L    = 6.0    # Luz (ancho) de la crujía [m]
+H    = 3.0    # Altura de la columna (1 nivel) [m]
+g    = 9.81   # Aceleración de la gravedad [m/s^2]
+
+# Dimensiones de secciones
+bcol  = 0.30  # Ancho columna [m]
+hcol  = 0.30  # Alto columna [m]
+bviga = 0.25  # Ancho viga [m]
+hviga = 0.30  # Alto viga [m]
+
+# ---------------------------------------------------------
+# 2. CREACIÓN DE NODOS Y APOYOS
+#    (4 nodos: base izquierda, base derecha, top izquierda, top derecha)
+# ---------------------------------------------------------
+ops.node(1, 0.0, 0.0)
+ops.node(2, L,   0.0)
+ops.node(3, 0.0, H)
+ops.node(4, L,   H)
+
+# Fijar nodos de base (1 y 2) en traslación y rotación
+ops.fix(1, 1, 1, 1)
+ops.fix(2, 1, 1, 1)
+
+# ---------------------------------------------------------
+# 3. MASAS PARA ANÁLISIS DINÁMICO
+#    (Asignamos masa en nodos superiores 3 y 4)
+# ---------------------------------------------------------
+mTop = 1000.0  # [kg]
+ops.mass(3, mTop, 0.0, 0.0)
+ops.mass(4, mTop, 0.0, 0.0)
+
+# ---------------------------------------------------------
+# 4. DEFINICIÓN DE MATERIALES NO LINEALES
+#    - Concreto confinado y no confinado (Concrete02)
+#    - Acero (Steel02)
+# ---------------------------------------------------------
+fc    = 30.0e6      # f'c [Pa]
+fy    = 420.0e6     # Fluencia del acero [Pa]
+Es    = 200.0e9     # Módulo elástico del acero [Pa]
+epscu = 0.005       # Deformación última aproximada p/ Concrete02
+Ec    = 4700.0 * math.sqrt(fc/1e6) * 1e6  # E del concreto (aprox.)
+
+# 4.1. Acero (Steel02)
+ops.uniaxialMaterial("Steel02", 10, fy, Es, 0.01, 18.0, 0.925, 0.15)
+# (Opcional) Acotamiento de deformación con MinMax:
+ops.uniaxialMaterial("MinMax", 11, 10, "-min", -0.05, "-max", 0.05)
+
+# 4.2. Concreto no confinado (cover)
+ops.uniaxialMaterial("Concrete02", 20, -fc, -2.0*fc/Ec, 0.0, -epscu, 0.1, 0.0, 0.0)
+
+# 4.3. Concreto confinado (núcleo)
+fcc  = 1.2 * fc    # f'c confinado (20% mayor, aprox.)
+fcu  = 0.2 * fc    # Resistencia última
+epsu = 0.015       # Deformación última
+ops.uniaxialMaterial("Concrete02", 21, -fcc, -2.0*fcc/Ec, -fcu, -epsu, 0.1, 0.0, 0.0)
+
+# ---------------------------------------------------------
+# 5. DEFINICIÓN DE SECCIONES DE FIBRA (COLUMNA Y VIGA)
+# ---------------------------------------------------------
+nFibCore  = 8     # Nº de divisiones en el núcleo
+nFibCover = 2     # Nº de divisiones en el cover
+db        = 0.016 # Diámetro de barra [m]
+Ab        = 3.14159*(db*db)/4.0
+rec       = 0.04  # Recubrimiento [m]
+
+# 5.1. Sección de la columna (tag = 1, luego aggregator = 101)
+ops.section("Fiber", 1)
+# Núcleo confinado
+ops.patch("rect", 21, nFibCore, nFibCore,
+          -(hcol/2.0 - rec), -(bcol/2.0 - rec),
+           (hcol/2.0 - rec),  (bcol/2.0 - rec))
+# Cover no confinado
+ops.patch("rect", 20, nFibCover, nFibCore,
+           (hcol/2.0 - rec), -bcol/2.0,
+           (hcol/2.0),       bcol/2.0)
+ops.patch("rect", 20, nFibCover, nFibCore,
+          -hcol/2.0, -bcol/2.0,
+          -(hcol/2.0 - rec),  bcol/2.0)
+ops.patch("rect", 20, nFibCore, nFibCover,
+          -(hcol/2.0 - rec), -bcol/2.0,
+           (hcol/2.0 - rec), -(bcol/2.0 - rec))
+ops.patch("rect", 20, nFibCore, nFibCover,
+          -(hcol/2.0 - rec),  (bcol/2.0 - rec),
+           (hcol/2.0 - rec),  bcol/2.0)
+
+# Barras en esquinas
+ops.fiber( (hcol/2.0 - rec), -(bcol/2.0 - rec), Ab, 11)
+ops.fiber( (hcol/2.0 - rec),  (bcol/2.0 - rec), Ab, 11)
+ops.fiber(-(hcol/2.0 - rec), -(bcol/2.0 - rec), Ab, 11)
+ops.fiber(-(hcol/2.0 - rec),  (bcol/2.0 - rec), Ab, 11)
+
+# Material a cortante en la columna
+Vcol = 1.0e5
+Kcol = 1.0e8
+ops.uniaxialMaterial("Steel01", 50, Vcol, Kcol, 0.01)
+
+# Sección aggregator para la columna
+ops.section("Aggregator", 101, 50, "Vy", "-section", 1)
+
+# 5.2. Sección de la viga (tag = 2, luego aggregator = 201)
+ops.section("Fiber", 2)
+# Núcleo confinado
+ops.patch("rect", 21, nFibCore, nFibCore,
+          -(hviga/2.0 - rec), -(bviga/2.0 - rec),
+           (hviga/2.0 - rec),  (bviga/2.0 - rec))
+# Cover no confinado
+ops.patch("rect", 20, nFibCover, nFibCore,
+           (hviga/2.0 - rec), -bviga/2.0,
+           hviga/2.0,         bviga/2.0)
+ops.patch("rect", 20, nFibCover, nFibCore,
+          -hviga/2.0, -bviga/2.0,
+          -(hviga/2.0 - rec),  bviga/2.0)
+ops.patch("rect", 20, nFibCore, nFibCover,
+          -(hviga/2.0 - rec), -bviga/2.0,
+           (hviga/2.0 - rec), -(bviga/2.0 - rec))
+ops.patch("rect", 20, nFibCore, nFibCover,
+          -(hviga/2.0 - rec),  (bviga/2.0 - rec),
+           (hviga/2.0 - rec),  bviga/2.0)
+
+nBarTop = 2
+nBarBot = 2
+spacing = (bviga - 2.0*rec) / (nBarTop - 1)
+
+# Barras superiores
+for i in range(nBarTop):
+    ops.fiber((hviga/2.0 - rec), -(bviga/2.0 - rec) + i*spacing, Ab, 11)
+# Barras inferiores
+for i in range(nBarBot):
+    ops.fiber(-(hviga/2.0 - rec), -(bviga/2.0 - rec) + i*spacing, Ab, 11)
+
+# Material a cortante en la viga
+Vvig = 5.0e4
+Kvig = 5.0e7
+ops.uniaxialMaterial("Steel01", 60, Vvig, Kvig, 0.01)
+
+# Sección aggregator para la viga
+ops.section("Aggregator", 201, 60, "Vy", "-section", 2)
+
+# ---------------------------------------------------------
+# 6. DEFINICIÓN DE BEAM INTEGRATION Y ELEMENTOS NO LINEALES
+#    (forceBeamColumn en OpenSeesPy requiere beamIntegration)
+# ---------------------------------------------------------
+ops.geomTransf("Corotational", 1)
+
+np_integ = 5  # Número de puntos de integración
+
+# Creamos beamIntegration para cada sección aggregator
+ops.beamIntegration("Lobatto", 1101, 101, np_integ)  # para columnas
+ops.beamIntegration("Lobatto", 1201, 201, np_integ)  # para la viga
+
+# Elementos:
+# Columnas (etiquetas 1 y 2) usando la integración 1101
+ops.element("forceBeamColumn", 1, 1, 3, 1, 1101, "-iter", 10, 1.0e-12)
+ops.element("forceBeamColumn", 2, 2, 4, 1, 1101, "-iter", 10, 1.0e-12)
+# Viga (etiqueta 3) usando la integración 1201
+ops.element("forceBeamColumn", 3, 3, 4, 1, 1201, "-iter", 10, 1.0e-12)
+
+# ---------------------------------------------------------
+# 7. GRABADORES (RECORDERS)
+# ---------------------------------------------------------
+if not os.path.exists("ResultadosNL"):
+    os.mkdir("ResultadosNL")
+
+ops.recorder("Node", "-file", "ResultadosNL/DispTop.out", 
+             "-time", "-node", 4, "-dof", 1, "disp")
+ops.recorder("Node", "-file", "ResultadosNL/BaseReact.out", 
+             "-time", "-node", 1, 2, "-dof", 1, 2, 3, "reaction")
+
+# ---------------------------------------------------------
+# 8. ANÁLISIS ESTÁTICO (CARGA GRAVITACIONAL)
+#    (A) Definir timeSeries para la carga estática
+# ---------------------------------------------------------
+GravPat = 1
+# (A) Definir timeSeries Constant con tag 101
+ops.timeSeries("Constant", 101)
+# Crear patrón Plain usando ese timeSeries (tag 101)
+ops.pattern("Plain", GravPat, 101)
+
+# Aplicar cargas en nodos 3 y 4
+ops.load(3, 0.0, -50000.0, 0.0)
+ops.load(4, 0.0, -50000.0, 0.0)
+
+ops.system("UmfPack")
+ops.numberer("RCM")
+ops.constraints("Plain")
+ops.test("NormDispIncr", 1.0e-6, 10)
+ops.algorithm("Newton")
+ops.integrator("LoadControl", 1.0)
+ops.analysis("Static")
+
+ops.analyze(1)
+ops.loadConst("-time", 0)
+print("Análisis estático completado.")
+
+# ---------------------------------------------------------
+# 9. AMORTIGUAMIENTO (RAYLEIGH)
+# ---------------------------------------------------------
+eigenvals = ops.eigen(1)
+omega = math.sqrt(eigenvals[0])
+zeta  = 0.02
+ops.rayleigh(0.0, 0.0, 0.0, 2.0*zeta*omega)
+
+# ---------------------------------------------------------
+# 10. PATRÓN DE EXCITACIÓN SÍSMICA
+#    (B) Definir timeSeries Path para el acelerograma
+# ---------------------------------------------------------
+dt       = 0.01
+Factor   = 0.03       # Factor de conversión y escala
+Npuntos  = 20000      # Nº de pasos (ajusta si tu registro es más corto)
+AccelDataFile = "SCT18509.txt"
+dirExcit = 1          # Dirección de excitación (eje X)
+
+# (B) Definir timeSeries Path con tag 202
+ops.timeSeries("Path", 202, '-dt', dt, '-filePath', AccelDataFile, '-factor', Factor)
+ops.pattern("UniformExcitation", 2, dirExcit, '-accel', 202)
+
+# ---------------------------------------------------------
+# 11. ANÁLISIS DINÁMICO TRANSITORIO
+# ---------------------------------------------------------
+ops.system("UmfPack")
+ops.numberer("RCM")
+ops.constraints("Plain")
+ops.test("NormDispIncr", 1.0e-8, 10)
+ops.algorithm("Newton")
+ops.integrator("Newmark", 0.5, 0.25)
+ops.analysis("Transient")
+
+ops.analyze(Npuntos, dt)
+print("Análisis dinámico completado.")
+
+# ---------------------------------------------------------
+# 12. CÁLCULO DEL PERIODO FUNDAMENTAL
+#     Se realiza un análisis modal para obtener el primer valor propio
+#     y se calcula T1 = 2π / sqrt(λ1)
+# ---------------------------------------------------------
+eigenvalues = ops.eigen(1)
+lambda1 = eigenvalues[0]
+T1 = 2.0 * 3.1416 / math.sqrt(lambda1)
+print(f"El periodo fundamental (T1) es: {T1} segundos")
+
+# ---------------------------------------------------------
+# 13. GRAFICAR DESPLAZAMIENTO VS. TIEMPO
+#     Se asume que el recorder 'ResultadosNL/DispTop.out' tiene:
+#       tiempo  desplazamiento
+# ---------------------------------------------------------
+# Esperamos que el archivo se haya generado; se carga con numpy
+try:
+    data = np.loadtxt("ResultadosNL/DispTop.out")
+    time = data[:, 0]
+    disp = data[:, 1]
+    
+    plt.figure(figsize=(8,5))
+    plt.plot(time, disp, 'b-', label='Desplazamiento nodo 4')
+    plt.xlabel('Tiempo [s]')
+    plt.ylabel('Desplazamiento [m]')
+    plt.title('Respuesta Dinámica: Desplazamiento en nodo 4')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+except Exception as e:
+    print("Error al cargar o graficar los datos:", e)
